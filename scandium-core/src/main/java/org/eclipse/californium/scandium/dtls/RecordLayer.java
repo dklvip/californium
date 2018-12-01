@@ -35,5 +35,5 @@ public interface RecordLayer {
 	 * @param flight the records to send. The properties of the flight are used to control the
 	 *                  timespan to wait between re-transmissions. 
 	 */
-	void sendFlight(DTLSFlight flight) throws IOException;
+	void sendFlight(DTLSFlight flight, Connection connection) throws IOException;
 }

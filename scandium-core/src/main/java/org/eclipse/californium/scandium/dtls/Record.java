@@ -109,6 +109,8 @@ public class Record {
 	/** The raw byte representation of the fragment. */
 	private byte[] fragmentBytes = null;
 
+	private ConnectionId connectionId = null;
+
 	/** The DTLS session. */
 	private DTLSSession session;
 
@@ -128,11 +130,12 @@ public class Record {
 	 * @param sequenceNumber the sequence number
 	 * @param fragmentBytes the encrypted data
 	 */
-	Record(ContentType type, ProtocolVersion version, int epoch, long sequenceNumber, byte[] fragmentBytes,
+	Record(ContentType type, ProtocolVersion version, int epoch, long sequenceNumber, ConnectionId connectionId, byte[] fragmentBytes,
 			InetSocketAddress peerAddress) {
 		this(type, epoch, sequenceNumber);
 		this.version = version;
-		this.fragmentBytes = Arrays.copyOf(fragmentBytes, fragmentBytes.length);
+		this.connectionId = connectionId;
+		this.fragmentBytes = fragmentBytes;
 		this.length = fragmentBytes.length;
 		this.peerAddress = peerAddress;
 	}
@@ -160,7 +163,7 @@ public class Record {
 	 * @throws GeneralSecurityException if the message could not be encrypted, e.g.
 	 *            because the JVM does not support the negotiated cipher suite's cipher algorithm
 	 */
-	public Record(ContentType type, int epoch, long sequenceNumber, DTLSMessage fragment, DTLSSession session) 
+	public Record(ContentType type, int epoch, long sequenceNumber, DTLSMessage fragment, DTLSSession session, boolean cid) 
 		throws GeneralSecurityException {
 		this(type, epoch, sequenceNumber);
 		if (session == null) {
@@ -168,6 +171,10 @@ public class Record {
 		}
 		this.fragment = fragment;
 		this.session = session;
+		this.peerAddress = session.getPeer();
+		if (cid && session != null) {
+			this.connectionId = session.getWriteConnectionId();
+		}
 		setFragment(fragment);
 	}
 
@@ -215,17 +222,23 @@ public class Record {
 	 * 
 	 * @return a byte array containing the <em>DTLSCiphertext</em> structure
 	 */
-	public synchronized byte[] toByteArray() {
+	public byte[] toByteArray() {
 		DatagramWriter writer = new DatagramWriter();
 
-		writer.write(type.getCode(), CONTENT_TYPE_BITS);
-
+		if (connectionId != null) {
+			writer.write(ContentType.TLS12_CID.getCode(), CONTENT_TYPE_BITS);
+		} else {
+			writer.write(type.getCode(), CONTENT_TYPE_BITS);
+		}
+		
 		writer.write(version.getMajor(), VERSION_BITS);
 		writer.write(version.getMinor(), VERSION_BITS);
 
 		writer.write(epoch, EPOCH_BITS);
 		writer.writeLong(sequenceNumber, SEQUENCE_NUMBER_BITS);
-
+		if (connectionId != null) {
+			writer.writeBytes(connectionId.getBytes());
+		}
 		length = fragmentBytes.length;
 		writer.write(length, LENGTH_BITS);
 
@@ -246,7 +259,7 @@ public class Record {
 	 * @return the <code>Record</code> instances
 	 * @throws NullPointerException if either one of the byte array or peer address is <code>null</code>
 	 */
-	public static List<Record> fromByteArray(byte[] byteArray, InetSocketAddress peerAddress) {
+	public static List<Record> fromByteArray(byte[] byteArray, InetSocketAddress peerAddress, Integer connectionIdLength) {
 		if (byteArray == null) {
 			throw new NullPointerException("Byte array must not be null");
 		} else if (peerAddress == null) {
@@ -272,6 +285,15 @@ public class Record {
 			int epoch = reader.read(EPOCH_BITS);
 			long sequenceNumber = reader.readLong(SEQUENCE_NUMBER_BITS);
 
+			ConnectionId connectionId = null;
+			if (type == ContentType.TLS12_CID.getCode()) {
+				if (connectionIdLength == null) {
+					LOGGER.debug("Received DTLS record of unsupported type [{}]. Discarding ...", type);
+					continue;
+				} else {
+					connectionId = new ConnectionId(reader.readBytes(connectionIdLength));
+				}
+			}
 			int length = reader.read(LENGTH_BITS);
 
 			if (reader.bitsLeft() < length) {
@@ -286,7 +308,8 @@ public class Record {
 			if (contentType == null) {
 				LOGGER.debug("Received DTLS record of unsupported type [{}]. Discarding ...", type);
 			} else {
-				records.add(new Record(contentType, version, epoch, sequenceNumber, fragmentBytes, peerAddress));
+				records.add(new Record(contentType, version, epoch, sequenceNumber, connectionId, fragmentBytes,
+						peerAddress));
 			}
 		}
 
@@ -306,7 +329,7 @@ public class Record {
 	 */
 	private byte[] encryptFragment(byte[] plaintextFragment) throws GeneralSecurityException {
 		
-		if (session == null) {
+		if (session == null || epoch == 0) {
 			return plaintextFragment;
 		}
 
@@ -559,6 +582,12 @@ public class Record {
 		byte[] key = session.getWriteState().getEncryptionKey().getEncoded();
 		byte[] additionalData = generateAdditionalData(byteArray.length);
 
+		if (LOGGER.isTraceEnabled()) {
+			LOGGER.trace("encrypt: {} bytes", byteArray.length);
+			LOGGER.trace("iv:    {}", StringUtil.byteArray2HexString(iv, StringUtil.NO_SEPARATOR, 0));
+			LOGGER.trace("nonce: {}", StringUtil.byteArray2HexString(iv, StringUtil.NO_SEPARATOR, 0));
+			LOGGER.trace("adata: {}", StringUtil.byteArray2HexString(additionalData, StringUtil.NO_SEPARATOR, 0));
+		}
 		byte[] encryptedFragment = CCMBlockCipher.encrypt(key, nonce, additionalData, byteArray, 8);
 
 		/*
@@ -568,6 +597,7 @@ public class Record {
 		 */
 		byte[] explicitNonce = generateExplicitNonce();
 		encryptedFragment = ByteArrayUtils.concatenate(explicitNonce, encryptedFragment);
+		LOGGER.trace("==> {} bytes", encryptedFragment.length);
 
 		return encryptedFragment;
 	}
@@ -617,6 +647,12 @@ public class Record {
 		}
 
 		byte[] nonce = getNonce(iv, explicitNonceUsed);
+		if (LOGGER.isTraceEnabled()) {
+			LOGGER.trace("decrypt: {} bytes", byteArray.length - 16);
+			LOGGER.trace("iv:    {}", StringUtil.byteArray2HexString(iv, StringUtil.NO_SEPARATOR, 0));
+			LOGGER.trace("nonce: {}", StringUtil.byteArray2HexString(iv, StringUtil.NO_SEPARATOR, 0));
+			LOGGER.trace("adata: {}", StringUtil.byteArray2HexString(additionalData, StringUtil.NO_SEPARATOR, 0));
+		}
 		return CCMBlockCipher.decrypt(key, nonce, additionalData, reader.readBytesLeft(), 8);
 	}
 
@@ -692,11 +728,16 @@ public class Record {
 		writer.write(epoch, EPOCH_BITS);
 		writer.writeLong(sequenceNumber, SEQUENCE_NUMBER_BITS);
 
-		writer.write(type.getCode(), CONTENT_TYPE_BITS);
-
+		if (connectionId != null) {
+			writer.write(ContentType.TLS12_CID.getCode(), CONTENT_TYPE_BITS);
+		} else {
+			writer.write(type.getCode(), CONTENT_TYPE_BITS);
+		}
 		writer.write(version.getMajor(), VERSION_BITS);
 		writer.write(version.getMinor(), VERSION_BITS);
-		
+		if (connectionId != null) {
+			writer.writeBytes(connectionId.getBytes());
+		}		
 		writer.write(length, LENGTH_BITS);
 
 		return writer.toByteArray();
@@ -750,13 +791,22 @@ public class Record {
 	 * @param sequenceNumber the new sequence number
 	 * @throws GeneralSecurityException if the fragment could not be re-encrypted
 	 */
-	public synchronized void setSequenceNumber(long sequenceNumber) throws GeneralSecurityException {
+	public void setSequenceNumber(long sequenceNumber) throws GeneralSecurityException {
 		if (sequenceNumber > MAX_SEQUENCE_NO) {
 			throw new IllegalArgumentException("Sequence number must have max 48 bits");
 		}
-		this.sequenceNumber = sequenceNumber;
-		if (session != null && session.getWriteState() != null && epoch > 0) {
-			fragmentBytes = encryptFragment(fragment.toByteArray());
+		if (this.sequenceNumber != sequenceNumber) {
+			this.sequenceNumber = sequenceNumber;
+			if (session != null && session.getWriteState() != null && epoch > 0) {
+				byte[] byteArray = fragment.toByteArray();
+				if (connectionId != null) {
+					int index = byteArray.length;
+					byteArray = Arrays.copyOf(byteArray, index + 1);
+					byteArray[index] = (byte) type.getCode();
+				}
+				length = byteArray.length;
+				fragmentBytes = encryptFragment(byteArray);
+			}
 		}
 	}
 
@@ -773,20 +823,50 @@ public class Record {
 		return length;
 	}
 
-	public synchronized void setSession(DTLSSession session) {
+	public void setSession(DTLSSession session) {
 		this.session = session;
-		if (session != null) {
-			this.peerAddress = null;
+		if (session != null && this.peerAddress == null) {
+			this.peerAddress = session.getPeer();
 		}
 	}
 
 	public InetSocketAddress getPeerAddress() {
-		if (session != null) {
-			return session.getPeer();
-		} else if (peerAddress != null) {
+		if (peerAddress != null) {
 			return peerAddress;
 		} else {
 			throw new IllegalStateException("Record does not have a peer address");
+		}
+	}
+
+	public ConnectionId getConnectionId() {
+		return connectionId;
+	}
+
+	public void setConnectionId(ConnectionId connectionId) {
+		if (connectionId == null) {
+			throw new NullPointerException("connection id must not be null!");
+		}
+		if (connectionId.length() == 0) {
+			throw new IllegalArgumentException("connection id must not be empty!");
+		}
+		if (this.connectionId == null) {
+			this.connectionId = connectionId;
+			if (fragment != null) {
+				byte[] byteArray = fragment.toByteArray();
+				int index = byteArray.length;
+				byte[] cidByteArray = Arrays.copyOf(byteArray, index + 1);
+				cidByteArray[index] = (byte) type.getCode();
+				try {
+					length = cidByteArray.length;
+					fragmentBytes = encryptFragment(cidByteArray);
+					LOGGER.debug("Prepare inner DTLS record type [{}]. {} - {} bytes ...", type, index, fragmentBytes.length);
+				} catch (GeneralSecurityException e) {
+					length = byteArray.length;
+					fragmentBytes = byteArray;
+					this.connectionId = null;
+					throw new RuntimeException(e);
+				}
+			}
 		}
 	}
 
@@ -839,9 +919,26 @@ public class Record {
 	 */
 	public DTLSMessage getFragment(final DTLSConnectionState currentReadState) throws GeneralSecurityException, HandshakeException {
 		if (fragment == null) {
+			ContentType innerType = type;
 			// decide, which type of fragment need de-cryption
 			byte[] decryptedMessage = decryptFragment(fragmentBytes, currentReadState);
-			switch (type) {
+
+			if (ContentType.TLS12_CID == type) {
+				int index = decryptedMessage.length - 1;
+				if (index < 0) {
+					throw new IllegalStateException("no payload!");
+				}
+				int typeCode = decryptedMessage[index];
+				innerType =  ContentType.getTypeByValue(typeCode);
+				if (innerType == null) {
+					LOGGER.debug("Received inner DTLS record of unsupported type [{}]. Discarding {} bytes ...", typeCode, index);
+					return null;
+				}
+				decryptedMessage = Arrays.copyOf(decryptedMessage, index);
+				length = decryptedMessage.length;
+			}
+
+			switch (innerType) {
 			case ALERT:
 				// http://tools.ietf.org/html/rfc5246#section-7.2:
 				// "Like other messages, alert messages are encrypted and
@@ -870,6 +967,7 @@ public class Record {
 			default:
 				LOGGER.warn("Cannot decrypt message of unsupported type [{}]", type);
 			}
+			type = innerType;
 		}
 
 		return fragment;
@@ -911,7 +1009,7 @@ public class Record {
 	 * @throws GeneralSecurityException if the message could not be encrypted, e.g.
 	 *            because the JVM does not support the negotiated cipher suite's cipher algorithm
 	 */
-	public synchronized void setFragment(DTLSMessage fragment) throws GeneralSecurityException {
+	public void setFragment(DTLSMessage fragment) throws GeneralSecurityException {
 
 		if (fragmentBytes == null) {
 			// serialize fragment and if necessary encrypt byte array
@@ -926,6 +1024,12 @@ public class Record {
 			case APPLICATION_DATA:
 			case HANDSHAKE:
 			case CHANGE_CIPHER_SPEC:
+				if (connectionId != null) {
+					int index = byteArray.length;
+					byteArray = Arrays.copyOf(byteArray, index + 1);
+					byteArray[index] = (byte) type.getCode();
+					length = byteArray.length;
+				}
 				byteArray = encryptFragment(byteArray);
 				break;
 
@@ -948,6 +1052,9 @@ public class Record {
 		sb.append(StringUtil.lineSeparator()).append("Version: ").append(version.getMajor()).append(", ").append(version.getMinor());
 		sb.append(StringUtil.lineSeparator()).append("Epoch: ").append(epoch);
 		sb.append(StringUtil.lineSeparator()).append("Sequence Number: ").append(sequenceNumber);
+		if (connectionId != null) {
+			sb.append(StringUtil.lineSeparator()).append("connection id: ").append(connectionId.getAsString());
+		}
 		sb.append(StringUtil.lineSeparator()).append("Length: ").append(length);
 		sb.append(StringUtil.lineSeparator()).append("Fragment:");
 		if (fragment != null) {

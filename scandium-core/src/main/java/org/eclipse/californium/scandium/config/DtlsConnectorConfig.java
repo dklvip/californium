@@ -235,6 +235,12 @@ public final class DtlsConnectorConfig {
 	 */
 	private Boolean useNoServerSessionId;
 
+	private Integer connectionIdLength;
+
+	private Boolean useConnectionIdInHandshake;
+
+	private String loggingTag;
+	
 	private DtlsConnectorConfig() {
 		// empty
 	}
@@ -367,6 +373,28 @@ public final class DtlsConnectorConfig {
 	 */
 	public Integer getVerifyPeersOnResumptionThreshold() {
 		return verifyPeersOnResumptionThreshold;
+	}
+
+	/**
+	 * Gets connection ID length.
+	 * 
+	 * @return length of connection id. 0 for support connection id, but not
+	 *         using it. {@code null} for no supported.
+	 */
+	public Integer getConnectionIdLength() {
+		return connectionIdLength;
+	}
+
+	/**
+	 * Gets whether the connection id is already used during the handshake, or
+	 * only used after the encryption is established as specified in 
+	 * <a https://tools.ietf.org/html/draft-ietf-tls-dtls-connection-id-02#section-3>
+	 * draft-ietf-tls-dtls-connection-id, version 02, section 3 (last sentence)</a>
+	 * 
+	 * @return {@code true}, use the connection id already in the handshake.
+	 */
+	public Boolean isConnectionIdUsedInHandshake() {
+		return useConnectionIdInHandshake;
 	}
 
 	/**
@@ -607,6 +635,10 @@ public final class DtlsConnectorConfig {
 		return trustedRPKs;
 	}
 
+	public String getLoggingTag() {
+		return loggingTag;
+	}
+
 	/**
 	 * @return a copy of this configuration
 	 */
@@ -643,6 +675,9 @@ public final class DtlsConnectorConfig {
 		cloned.sniEnabled = sniEnabled;
 		cloned.verifyPeersOnResumptionThreshold = verifyPeersOnResumptionThreshold;
 		cloned.useNoServerSessionId = useNoServerSessionId;
+		cloned.connectionIdLength = connectionIdLength;
+		cloned.useConnectionIdInHandshake = useConnectionIdInHandshake;
+		cloned.loggingTag = loggingTag;
 		return cloned;
 	}
 
@@ -1379,6 +1414,35 @@ public final class DtlsConnectorConfig {
 		}
 
 		/**
+		 * Sets the connection ID length.
+		 * 
+		 * @param connectionIdLength
+		 * @return this builder for command chaining.
+		 */
+		public Builder setConnectionIdLength(final Integer connectionIdLength) {
+			if (connectionIdLength != null && connectionIdLength < 0) {
+				throw new IllegalArgumentException("cid length must be at least 0");
+			}
+			config.connectionIdLength = connectionIdLength;
+			return this;
+		}
+
+		/**
+		 * Gets whether the connection id is already used during the handshake,
+		 * or only used after the encryption is established as specified in 
+		 * <a https://tools.ietf.org/html/draft-ietf-tls-dtls-connection-id-02#section-3>
+		 * draft-ietf-tls-dtls-connection-id, version 02, section 3 (last sentence)
+		 * </a>
+		 * 
+		 * @param enable {@code true} to use the connection id already in the handshake.
+		 * @return this builder for command chaining.
+		 */
+		public Builder setConnectionIdUsedInHandshake(boolean enable) {
+			config.useConnectionIdInHandshake = enable;
+			return this;
+		}
+
+		/**
 		 * Set the number of thread which should be used to handle DTLS
 		 * connection.
 		 * <p>
@@ -1422,8 +1486,8 @@ public final class DtlsConnectorConfig {
 		 * @throws IllegalArgumentException if the timeout is below 1
 		 *             millisecond
 		 */
-		public Builder setAutoResumptionTimeoutMillis(long timeoutInMillis) {
-			if (timeoutInMillis < 1) {
+		public Builder setAutoResumptionTimeoutMillis(Long timeoutInMillis) {
+			if (timeoutInMillis != null && timeoutInMillis < 1) {
 				throw new IllegalArgumentException("auto resumption timeout must not below 1!");
 			}
 			config.autoResumptionTimeoutMillis = timeoutInMillis;
@@ -1483,6 +1547,11 @@ public final class DtlsConnectorConfig {
 			return this;
 		}
 
+		public Builder setLoggingTag(String tag) {
+			config.loggingTag = tag;
+			return this;
+		}
+
 		private boolean isConfiguredWithKeyPair() {
 			return config.privateKey != null && config.publicKey != null;
 		}
@@ -1524,6 +1593,9 @@ public final class DtlsConnectorConfig {
 			if (config.address == null) {
 				config.address = new InetSocketAddress(0);
 			}
+			if (config.loggingTag == null) {
+				config.loggingTag = "";
+			}
 			if (config.enableReuseAddress == null) {
 				config.enableReuseAddress = false;
 			}
@@ -1535,6 +1607,9 @@ public final class DtlsConnectorConfig {
 			}
 			if (config.maxRetransmissions == null) {
 				config.maxRetransmissions = DEFAULT_MAX_RETRANSMISSIONS;
+			}
+			if (config.useConnectionIdInHandshake == null) {
+				config.useConnectionIdInHandshake = false;
 			}
 			if (config.clientAuthenticationRequired == null) {
 				config.clientAuthenticationRequired = true;

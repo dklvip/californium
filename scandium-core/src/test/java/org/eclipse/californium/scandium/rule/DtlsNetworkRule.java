@@ -68,7 +68,7 @@ public class DtlsNetworkRule extends NetworkRule {
 				return "[] (empty)";
 			}
 			try {
-				List<Record> records = Record.fromByteArray(data, ADDRESS);
+				List<Record> records = Record.fromByteArray(data, ADDRESS, null);
 				int max = records.size();
 				StringBuilder builder = new StringBuilder();
 				for (int index = 0; index < max;) {

@@ -35,9 +35,10 @@
 package org.eclipse.californium.scandium.dtls;
 
 import java.net.InetSocketAddress;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.eclipse.californium.elements.util.LeastRecentlyUsedCache;
 import org.eclipse.californium.elements.util.SerialExecutor;
@@ -45,34 +46,33 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * An in-memory <code>ConnectionStore</code> with a configurable maximum capacity
- * and support for evicting stale connections based on a <em>least recently used</em> policy.
+ * An in-memory <code>ConnectionStore</code> with a configurable maximum
+ * capacity and support for evicting stale connections based on a <em>least
+ * recently used</em> policy.
  * <p>
  * The store keeps track of the connections' last-access time automatically.
- * Every time a connection is read from or put to the store the access-time
- * is updated.
+ * Every time a connection is read from or put to the store the access-time is
+ * updated.
  * </p>
  * <p>
- * A connection can be successfully added to the store if any of the
- * following conditions is met:
+ * A connection can be successfully added to the store if any of the following
+ * conditions is met:
  * </p>
  * <ul>
  * <li>The store's remaining capacity is greater than zero.</li>
  * <li>The store contains at least one <em>stale</em> connection, i.e. a
  * connection that has not been accessed for at least the store's <em>
  * connection expiration threshold</em> period. In such a case the least
- * recently accessed stale connection gets evicted from the store to make
- * place for the new connection to be added.</li>
+ * recently accessed stale connection gets evicted from the store to make place
+ * for the new connection to be added.</li>
  * </ul>
  * <p>
- * This implementation uses a <code>java.util.HashMap</code> with
- * a connection's peer address as key as its backing store.
- * In addition to that the store keeps a doubly-linked list of the
- * connections in access-time order.
+ * This implementation uses a <code>java.util.HashMap</code> with a connection's
+ * peer address as key as its backing store. In addition to that the store keeps
+ * a doubly-linked list of the connections in access-time order.
  * </p>
  * <p>
- * Insertion, lookup and removal of connections is done in
- * <em>O(log n)</em>.
+ * Insertion, lookup and removal of connections is done in <em>O(log n)</em>.
  * </p>
  * <p>
  * Storing and reading to/from the store is thread safe.
@@ -81,20 +81,24 @@ import org.slf4j.LoggerFactory;
 public final class InMemoryConnectionStore implements ResumptionSupportingConnectionStore {
 
 	private static final Logger LOG = LoggerFactory.getLogger(InMemoryConnectionStore.class.getName());
+	private static final int DEFAULT_CID_LENGTH = 6;
 	private static final int DEFAULT_CACHE_SIZE = 150000;
 	private static final long DEFAULT_EXPIRATION_THRESHOLD = 36 * 60 * 60; // 36h
-	private final LeastRecentlyUsedCache<InetSocketAddress, Connection> connections;
-	private final Map<SessionId, Connection> connectionsByEstablishedSession;
+	private final LeastRecentlyUsedCache<ConnectionId, Connection> connections;
+	private final ConcurrentMap<InetSocketAddress, Connection> connectionsByAddress;
+	private final ConcurrentMap<SessionId, Connection> connectionsByEstablishedSession;
 	private final SessionCache sessionCache;
+	private final Random random = new Random(System.currentTimeMillis());
+	private final int cidLength;
 
 	private String tag = "";
 
 	/**
-	 * Creates a store with a capacity of 500000 connections and
-	 * a connection expiration threshold of 36 hours.
+	 * Creates a store with a capacity of 500000 connections and a connection
+	 * expiration threshold of 36 hours.
 	 */
 	public InMemoryConnectionStore() {
-		this(DEFAULT_CACHE_SIZE, DEFAULT_EXPIRATION_THRESHOLD);
+		this(DEFAULT_CID_LENGTH, DEFAULT_CACHE_SIZE, DEFAULT_EXPIRATION_THRESHOLD, null);
 	}
 
 	/**
@@ -105,69 +109,101 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	 *            connection state of established DTLS sessions.
 	 */
 	public InMemoryConnectionStore(final SessionCache sessionCache) {
-		this(DEFAULT_CACHE_SIZE, DEFAULT_EXPIRATION_THRESHOLD, sessionCache);
+		this(DEFAULT_CID_LENGTH, DEFAULT_CACHE_SIZE, DEFAULT_EXPIRATION_THRESHOLD, sessionCache);
 	}
 
 	/**
 	 * Creates a store based on given configuration parameters.
 	 * 
 	 * @param capacity the maximum number of connections the store can manage
-	 * @param threshold the period of time of inactivity (in seconds) after which a
-	 *            connection is considered stale and can be evicted from the store if
-	 *            a new connection is to be added to the store
+	 * @param threshold the period of time of inactivity (in seconds) after
+	 *            which a connection is considered stale and can be evicted from
+	 *            the store if a new connection is to be added to the store
 	 */
 	public InMemoryConnectionStore(final int capacity, final long threshold) {
-		this(capacity, threshold, null);
+		this(DEFAULT_CID_LENGTH, capacity, threshold, null);
 	}
 
 	/**
 	 * Creates a store based on given configuration parameters.
 	 * 
 	 * @param capacity the maximum number of connections the store can manage
-	 * @param threshold the period of time of inactivity (in seconds) after which a
-	 *            connection is considered stale and can be evicted from the store if
-	 *            a new connection is to be added to the store
+	 * @param threshold the period of time of inactivity (in seconds) after
+	 *            which a connection is considered stale and can be evicted from
+	 *            the store if a new connection is to be added to the store
 	 * @param sessionCache a second level cache to use for <em>current</em>
-	 *                     connection state of established DTLS sessions.
-	 *                     If implements {@link ClientSessionCache}, restore
-	 *                     connection from the cache and mark them to resume. 
+	 *            connection state of established DTLS sessions. If implements
+	 *            {@link ClientSessionCache}, restore connection from the cache
+	 *            and mark them to resume.
 	 */
-	public InMemoryConnectionStore(final int capacity, final long threshold, final SessionCache sessionCache) {
-		connections = new LeastRecentlyUsedCache<>(capacity, threshold);
-		connections.setEvictingOnReadAccess(false);
-		connections.setUpdatingOnReadAccess(false);
-		connectionsByEstablishedSession = new HashMap<>();
+	public InMemoryConnectionStore(final Integer cidLength, final int capacity, final long threshold, final SessionCache sessionCache) {
+		this.connections = new LeastRecentlyUsedCache<>(capacity, threshold);
+		this.connections.setEvictingOnReadAccess(false);
+		this.connections.setUpdatingOnReadAccess(false);
+		this.connectionsByEstablishedSession = new ConcurrentHashMap<>();
+		this.connectionsByAddress = new ConcurrentHashMap<>();
 		this.sessionCache = sessionCache;
-
+		if (cidLength == null || cidLength == 0) {
+			this.cidLength = DEFAULT_CID_LENGTH;
+		} else {
+			this.cidLength = cidLength;
+		}
 		if (sessionCache != null) {
-			// make sure that session state for stale (evicted) connections is removed from second level cache
+			// make sure that session state for stale (evicted) connections is
+			// removed from second level cache
 			connections.addEvictionListener(new LeastRecentlyUsedCache.EvictionListener<Connection>() {
 
 				@Override
-				public void onEviction(Connection staleConnection) {
-					removeFromEstablishedSessions(staleConnection);
-					removeSessionFromCache(staleConnection);
+				public void onEviction(final Connection staleConnection) {
+					Runnable remove = new Runnable() {
+
+						@Override
+						public void run() {
+							Handshaker handshaker = staleConnection.getOngoingHandshake();
+							if (handshaker != null) {
+								handshaker.handshakeFailed(new RuntimeException("Evicted!"));
+							}
+							synchronized (InMemoryConnectionStore.this) {
+								removeFromAddressConnections(staleConnection);
+								removeFromEstablishedSessions(staleConnection);
+								removeSessionFromCache(staleConnection);
+							}
+						}
+					};
+					if (staleConnection.isExecuting()) {
+						staleConnection.getExecutor().execute(remove);
+					} else {
+						remove.run();
+					}
 				}
 			});
-			
+
 			if (sessionCache instanceof ClientSessionCache) {
 				ClientSessionCache clientCache = (ClientSessionCache) sessionCache;
 				LOG.debug("resume client sessions {}", clientCache);
 				for (InetSocketAddress peer : clientCache) {
 					SessionTicket ticket = clientCache.getSessionTicket(peer);
 					SessionId id = clientCache.getSessionIdentity(peer);
+					byte[] cidBytes = new byte[6];
+					ConnectionId cid = new ConnectionId(cidBytes);
 					if (ticket != null && id != null) {
-						// restore connection from session ticket 
+						// restore connection from session ticket
 						Connection connection = new Connection(ticket, id);
 						connection.setResumptionRequired(true);
-						connections.put(peer, connection);
-						LOG.debug("resume {} {}", peer, id);
+						ConnectionId connectionId = newConnectionId();
+						if (connectionId != null) {
+							connection.setConnectionId(connectionId);
+							connections.put(cid, connection);
+							connectionsByAddress.put(peer, connection);
+							LOG.debug("resume {} {}", peer, id);
+							break;
+						}
 					}
 				}
 			}
 		}
-		LOG.info("Created new InMemoryConnectionStore [capacity: {}, connection expiration threshold: {}s]",
-				capacity, threshold);
+		LOG.info("Created new InMemoryConnectionStore [capacity: {}, connection expiration threshold: {}s]", capacity,
+				threshold);
 	}
 
 	/**
@@ -175,12 +211,25 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	 * 
 	 * @param tag tag for logging
 	 */
-	public synchronized void setTag(final String tag) {
-		if (tag.endsWith(" ")) {
+	public synchronized InMemoryConnectionStore setTag(final String tag) {
+		if (tag.isEmpty() || tag.endsWith(" ")) {
 			this.tag = tag;
 		} else {
 			this.tag = tag + " ";
 		}
+		return this;
+	}
+
+	private ConnectionId newConnectionId() {
+		byte[] cidBytes = new byte[cidLength];
+		for (int i = 0; i < 10; ++i) {
+			random.nextBytes(cidBytes);
+			ConnectionId cid = new ConnectionId(cidBytes);
+			if (connections.get(cid) == null) {
+				return cid;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -199,9 +248,9 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	 * place for the new connection to be added.</li>
 	 * </ul>
 	 * 
-	 * @return <code>true</code> if the connection could be added to the
-	 *         store, <code>false</code> otherwise, e.g. because the store's
-	 *         remaining capacity is zero and no stale connection can be evicted
+	 * @return <code>true</code> if the connection could be added to the store,
+	 *         <code>false</code> otherwise, e.g. because the store's remaining
+	 *         capacity is zero and no stale connection can be evicted
 	 * @throws IllegalStateException, if the connection is not executing!
 	 */
 	@Override
@@ -211,12 +260,31 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 			if (!connection.isExecuting()) {
 				throw new IllegalStateException("Connection is not executing!");
 			}
-			if (connections.put(connection.getPeerAddress(), connection)) {
-				LOG.debug("{}connection: add {}", tag, connection.getPeerAddress());
+			ConnectionId connectionId = connection.getConnectionId();
+			if (connectionId == null) {
+				connectionId = newConnectionId();
+				if (connectionId == null) {
+					throw new IllegalStateException("Connection ids exhausted!");
+				}
+				connection.setConnectionId(connectionId);
+			} else if (connectionId.isEmpty()) {
+				throw new IllegalStateException("Connection must have a none empty connection id!");
+			} else if (connections.get(connectionId) != null) {
+				throw new IllegalStateException("Connection id already used! " + connectionId);
+			}
+			if (connections.put(connectionId, connection)) {
+				if (LOG.isTraceEnabled()) {
+					LOG.trace("{}connection: add {} (size {})", tag, connection, connections.size(), new Throwable("connection added!"));
+				} else {
+					LOG.debug("{}connection: add {} (size {})", tag, connectionId, connections.size());
+				}
+				addToAddressConnections(connection);
 				return true;
 			} else {
-				LOG.debug("{}connection store is full! {} max. entries.", tag, connections.getCapacity());
-				dump();
+				LOG.info("{}connection store is full! {} max. entries.", tag, connections.getCapacity());
+				if (LOG.isDebugEnabled()) {
+					dump();
+				}
 				return false;
 			}
 		} else {
@@ -225,14 +293,32 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	}
 
 	@Override
-	public synchronized boolean update(final Connection connection) {
-		if (connection != null && connections.update(connection.getPeerAddress())) {
+	public synchronized boolean update(final Connection connection, InetSocketAddress newPeerAddress) {
+		if (connection != null && connections.update(connection.getConnectionId())) {
+			InetSocketAddress oldPeerAddress = connection.getPeerAddress();
+			if (oldPeerAddress != newPeerAddress && (oldPeerAddress == null || !oldPeerAddress.equals(newPeerAddress))) {
+				LOG.debug("{}connection: {} updated, address changed from {} to {}!", tag, connection.getConnectionId(),
+						oldPeerAddress, newPeerAddress);
+				if (oldPeerAddress != null) {
+					connectionsByAddress.remove(oldPeerAddress, connection);
+				}
+				connection.setPeerAddress(newPeerAddress);
+				if (newPeerAddress != null) {
+					addToAddressConnections(connection);
+				}
+			} else {
+				LOG.debug("{}connection: {} - {} updated!", tag, connection.getConnectionId(), newPeerAddress);
+			}
 			return true;
 		} else {
+			if (connection != null) {
+				LOG.debug("{}connection: {} - {} update failed!", tag, connection.getConnectionId(), newPeerAddress);
+			}
 			return false;
 		}
 	}
 
+	@Override
 	public synchronized void putEstablishedSession(final DTLSSession session, final Connection connection) {
 		SessionId sessionId = session.getSessionIdentifier();
 		if (!sessionId.isEmpty()) {
@@ -260,20 +346,24 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 				// make sure a stale session cannot be resumed
 				SessionTicket ticket = sessionCache.get(id);
 				if (ticket == null) {
-					// either a session with the given ID has never been established (on other nodes)
-					// or another node has removed the session from the cache, e.g. because it became
+					// either a session with the given ID has never been
+					// established (on other nodes)
+					// or another node has removed the session from the cache,
+					// e.g. because it became
 					// stale
 
 					if (conFromLocalCache != null) {
 						// remove corresponding connection from this store
 						remove(conFromLocalCache, false);
-						// TODO: should we send a fatal alert to peer in this case?
+						// TODO: should we send a fatal alert to peer in this
+						// case?
 					}
 
 					return null;
 
 				} else if (conFromLocalCache == null) {
-					// this probably means that we are taking over the session from a failed node
+					// this probably means that we are taking over the session
+					// from a failed node
 					return new Connection(ticket, id);
 					// connection will be put to first level cache as part of
 					// the abbreviated handshake
@@ -288,7 +378,7 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	private synchronized Connection findLocally(final SessionId id) {
 		Connection connection = connectionsByEstablishedSession.get(id);
 		if (connection != null) {
-			connections.update(connection.getPeerAddress());
+			connections.update(connection.getConnectionId());
 		}
 		return connection;
 	}
@@ -296,40 +386,34 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 	@Override
 	public synchronized void markAllAsResumptionRequired() {
 		for (Connection connection : connections.values()) {
-			connection.setResumptionRequired(true);
-			LOG.debug("{}connection: mark for resumption {}!", tag, connection.getPeerAddress());
+			if (connection.getPeerAddress() != null && !connection.isResumptionRequired()) {
+				connection.setResumptionRequired(true);
+				LOG.debug("{}connection: mark for resumption {}!", tag, connection);
+			}
 		}
 	}
 
 	@Override
 	public synchronized int remainingCapacity() {
-		return connections.remainingCapacity();
+		int remaining = connections.remainingCapacity();
+		LOG.debug("{}connection: size{}, remaining {}!", tag, connections.size(), remaining);
+		return remaining;
 	}
 
 	@Override
 	public synchronized Connection get(final InetSocketAddress peerAddress) {
-		return connections.get(peerAddress);
+		Connection connection = connectionsByAddress.get(peerAddress);
+		if (connection == null) {
+			LOG.debug("{}connection: missing connection for {}!", tag, peerAddress);
+		}
+		return connection;
 	}
 
 	@Override
-	public Connection remove(final InetSocketAddress peerAddress) {
-		return remove(peerAddress, true);
-	}
-
-	@Override
-	public synchronized Connection remove(final InetSocketAddress peerAddress, final boolean removeFromSessionCache) {
-		Connection connection = connections.remove(peerAddress);
-		if (connection != null) {
-			if (LOG.isTraceEnabled()) {
-				LOG.trace("{}connection: remove {}:{}", tag, connection, peerAddress,
-						new Throwable("connection removed!"));
-			} else {
-				LOG.debug("{}connection: remove {}", tag, peerAddress);
-			}
-			removeFromEstablishedSessions(connection);
-			if (removeFromSessionCache) {
-				removeSessionFromCache(connection);
-			}
+	public synchronized Connection get(final ConnectionId cid) {
+		Connection connection = connections.get(cid);
+		if (connection == null) {
+			LOG.debug("{}connection: missing connection for {}!", tag, cid);
 		}
 		return connection;
 	}
@@ -341,15 +425,15 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 
 	@Override
 	public synchronized boolean remove(final Connection connection, final boolean removeFromSessionCache) {
-		boolean removed = connections.remove(connection.getPeerAddress(), connection) == connection;
+		boolean removed = connections.remove(connection.getConnectionId(), connection) == connection;
 		if (removed) {
 			if (LOG.isTraceEnabled()) {
-				LOG.trace("{}connection: remove {}:{}", tag, connection, connection.getPeerAddress(),
-						new Throwable("connection removed!"));
+				LOG.trace("{}connection: remove {} (size {})", tag, connection, connections.size(), new Throwable("connection removed!"));
 			} else {
-				LOG.debug("{}connection: remove {}", tag, connection.getPeerAddress());
+				LOG.debug("{}connection: remove {} (size {})", tag, connection, connections.size());
 			}
 			removeFromEstablishedSessions(connection);
+			removeFromAddressConnections(connection);
 			if (removeFromSessionCache) {
 				removeSessionFromCache(connection);
 			}
@@ -362,9 +446,43 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 		if (establishedSession != null) {
 			SessionId sessionId = establishedSession.getSessionIdentifier();
 			Connection removedConnection = connectionsByEstablishedSession.remove(sessionId);
-			if (removedConnection != connection) {
+			if (removedConnection != null && removedConnection != connection) {
 				connectionsByEstablishedSession.put(sessionId, removedConnection);
 			}
+		}
+	}
+
+	private void addToAddressConnections(Connection connection) {
+		final InetSocketAddress peerAddress = connection.getPeerAddress();
+		if (peerAddress != null) {
+			final Connection previous = connectionsByAddress.put(peerAddress, connection);
+			if (previous != null && previous != connection) {
+				Runnable removeAddress = new Runnable() {
+
+					@Override
+					public void run() {
+						if (previous.equalsPeerAddress(peerAddress)) {
+							previous.setPeerAddress(null);
+						}
+					}
+				};
+				LOG.debug("{}connection: {} - {} added! {} removed from address.", tag, connection.getConnectionId(),
+						peerAddress, previous.getConnectionId());
+				if (previous.isExecuting()) {
+					previous.getExecutor().execute(removeAddress);
+				} else {
+					removeAddress.run();
+				}
+			} else {
+				LOG.debug("{}connection: {} - {} added!", tag, connection.getConnectionId(), peerAddress);
+			}
+		}
+	}
+
+	private void removeFromAddressConnections(Connection connection) {
+		InetSocketAddress peerAddress = connection.getPeerAddress();
+		if (peerAddress != null) {
+			connectionsByAddress.remove(peerAddress, connection);
 		}
 	}
 
@@ -384,6 +502,7 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 		}
 		connections.clear();
 		connectionsByEstablishedSession.clear();
+		connectionsByAddress.clear();
 		// TODO: does it make sense to clear the SessionCache as well?
 	}
 
@@ -405,7 +524,13 @@ public final class InMemoryConnectionStore implements ResumptionSupportingConnec
 			LOG.debug("  {}connections empty!", tag);
 		} else {
 			for (Connection connection : connections.values()) {
-				LOG.debug("  {}connection: {}", tag, connection.getPeerAddress());
+				if (connection.hasEstablishedSession()) {
+					LOG.debug("  {}connection: {} - {} : {}", tag, connection.getConnectionId(),
+							connection.getPeerAddress(), connection.getSession().getSessionIdentifier());
+				} else {
+					LOG.debug("  {}connection: {} - {}", tag, connection.getConnectionId(),
+							connection.getPeerAddress());
+				}
 			}
 		}
 	}
