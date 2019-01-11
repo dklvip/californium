@@ -328,7 +328,10 @@ public class CredentialsUtil {
 			List<CipherSuite> suites = new ArrayList<>();
 			if (x509 >= 0 || rpk >= 0 || x509Trust || rpkTrust) {
 				suites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8);
+				suites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
 				suites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256);
+				suites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA);
+				suites.add(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384);
 			}
 			if (ecdhePsk) {
 				suites.add(CipherSuite.TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA256);

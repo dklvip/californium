@@ -56,6 +56,7 @@ package org.eclipse.californium.scandium.dtls;
 
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.security.cert.CertPath;
 import java.util.Arrays;
@@ -420,7 +421,8 @@ public class ServerHandshaker extends Handshaker {
 
 		// Verify client's data
 		byte[] handshakeHash = md.digest();
-		message.verifyData(getMasterSecret(), true, handshakeHash);
+		String prfMacName = session.getCipherSuite().getPseudoRandomFunctionMacName();
+		message.verifyData(prfMacName, getMasterSecret(), true, handshakeHash);
 
 		/*
 		 * First, send ChangeCipherSpec
@@ -433,7 +435,7 @@ public class ServerHandshaker extends Handshaker {
 		 * Second, send Finished message
 		 */
 		handshakeHash = mdWithClientFinished.digest();
-		Finished finished = new Finished(getMasterSecret(), isClient, handshakeHash, session.getPeer());
+		Finished finished = new Finished(prfMacName, getMasterSecret(), isClient, handshakeHash, session.getPeer());
 		flight.addMessage(wrapMessage(finished));
 
 		state = HandshakeType.FINISHED.getCode();
@@ -467,10 +469,6 @@ public class ServerHandshaker extends Handshaker {
 		flightNumber = (cookie != null && cookie.length > 0) ? 4 : 2;
 
 		DTLSFlight flight = new DTLSFlight(getSession(), flightNumber);
-
-		// update the handshake hash
-		md.update(clientHello.getRawMessage());
-		handshakeMessages = ByteArrayUtils.concatenate(handshakeMessages, clientHello.getRawMessage());
 
 		createServerHello(clientHello, flight);
 
@@ -522,6 +520,17 @@ public class ServerHandshaker extends Handshaker {
 		ServerHello serverHello = new ServerHello(serverVersion, serverRandom, sessionId,
 				session.getCipherSuite(), session.getCompressionMethod(), serverHelloExtensions, session.getPeer());
 		flight.addMessage(wrapMessage(serverHello));
+
+		String hashName = session.getCipherSuite().getPseudoRandomFunctionHashName();
+		try {
+			this.md = MessageDigest.getInstance(hashName);
+		} catch (NoSuchAlgorithmException e) {
+			throw new IllegalStateException(
+					String.format("Message digest algorithm %s is not available on JVM", hashName));
+		}
+		// update the handshake hash
+		md.update(clientHello.getRawMessage());
+		handshakeMessages = ByteArrayUtils.concatenate(handshakeMessages, clientHello.getRawMessage());
 
 		// update the handshake hash
 		md.update(serverHello.toByteArray());
