@@ -270,6 +270,10 @@ public class CredentialsUtil {
 				SslContextUtil.Credentials serverCredentials = SslContextUtil.loadCredentials(
 						SslContextUtil.CLASSPATH_SCHEME + KEY_STORE_LOCATION, certificateAlias, KEY_STORE_PASSWORD,
 						KEY_STORE_PASSWORD);
+				// load self signed root.
+				serverCredentials = SslContextUtil.loadCredentials(
+						SslContextUtil.CLASSPATH_SCHEME + TRUST_STORE_LOCATION, TRUST_NAME, TRUST_STORE_PASSWORD,
+						TRUST_STORE_PASSWORD);
 				if (!noAuth) {
 					if (x509 >= 0) {
 						Certificate[] trustedCertificates = SslContextUtil.loadTrustedCertificates(
