@@ -737,8 +737,9 @@ public class Record {
 		writer.write(version.getMajor(), VERSION_BITS);
 		writer.write(version.getMinor(), VERSION_BITS);
 		if (connectionId != null) {
+			writer.write(connectionId.length(), 8);
 			writer.writeBytes(connectionId.getBytes());
-		}		
+		}
 		writer.write(length, LENGTH_BITS);
 
 		return writer.toByteArray();
